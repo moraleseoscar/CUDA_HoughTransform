@@ -13,7 +13,11 @@
 #include <math.h>
 #include <cuda.h>
 #include <string.h>
-#include "common/pgm.h"
+#include "pgm.h"
+
+#ifndef M_PI
+#define M_PI 3.141592653589793238462643383279502884L
+#endif
 
 const int degreeInc = 2;
 const int degreeBins = 180 / degreeInc;
@@ -72,37 +76,29 @@ void CPU_HoughTran (unsigned char *pic, int w, int h, int **acc)
 // The accummulator memory needs to be allocated by the host in global memory
 __global__ void GPU_HoughTran (unsigned char *pic, int w, int h, int *acc, float rMax, float rScale, float *d_Cos, float *d_Sin)
 {
-  //TODO calcular: int gloID = ?
-  int gloID = w * h + 1; //TODO
-  if (gloID > w * h) return;      // in case of extra threads in block
+  int blockId = blockIdx.y * gridDim.x + blockIdx.x;
+  int gloID = blockId * blockDim.x * blockDim.y + threadIdx.y * blockDim.x + threadIdx.x;
+
+  if (gloID >= w * h)
+    return;
 
   int xCent = w / 2;
   int yCent = h / 2;
 
-  //TODO explicar bien bien esta parte. Dibujar un rectangulo a modo de imagen sirve para visualizarlo mejor
   int xCoord = gloID % w - xCent;
   int yCoord = yCent - gloID / w;
 
-  //TODO eventualmente usar memoria compartida para el acumulador
-
   if (pic[gloID] > 0)
+  {
+    for (int tIdx = 0; tIdx < degreeBins; tIdx++)
     {
-      for (int tIdx = 0; tIdx < degreeBins; tIdx++)
-        {
-          //TODO utilizar memoria constante para senos y cosenos
-          //float r = xCoord * cos(tIdx) + yCoord * sin(tIdx); //probar con esto para ver diferencia en tiempo
-          float r = xCoord * d_Cos[tIdx] + yCoord * d_Sin[tIdx];
-          int rIdx = (r + rMax) / rScale;
-          //debemos usar atomic, pero que race condition hay si somos un thread por pixel? explique
-          atomicAdd (acc + (rIdx * degreeBins + tIdx), 1);
-        }
+      float r = xCoord * d_Cos[tIdx] + yCoord * d_Sin[tIdx];
+      int rIdx = (r + rMax) / rScale;
+      atomicAdd(&acc[rIdx * degreeBins + tIdx], 1);
     }
-
-  //TODO eventualmente cuando se tenga memoria compartida, copiar del local al global
-  //utilizar operaciones atomicas para seguridad
-  //faltara sincronizar los hilos del bloque en algunos lados
-
+  }
 }
+
 
 //*****************************************************************
 int main (int argc, char **argv)
@@ -172,6 +168,25 @@ int main (int argc, char **argv)
   printf("Done!\n");
 
   // TODO clean-up
+delete[] cpuht;
+delete[] pcCos;
+delete[] pcSin;
+free(h_hough);
 
-  return 0;
+cudaFree(d_Cos);
+cudaFree(d_Sin);
+
+// Sincronización y manejo de errores de CUDA
+cudaDeviceSynchronize();
+
+cudaError_t cudaError = cudaGetLastError();
+if (cudaError != cudaSuccess) {
+    fprintf(stderr, "Error en la llamada al kernel: %s\n", cudaGetErrorString(cudaError));
+    exit(EXIT_FAILURE);
+}
+
+cudaFree(d_in);
+cudaFree(d_hough);
+
+return 0;
 }
