@@ -13,7 +13,11 @@
 #include <math.h>
 #include <cuda.h>
 #include <string.h>
-#include "common/pgm.h"
+#include "pgm.h"
+
+#ifndef M_PI
+#define M_PI 3.141592653589793238462643383279502884L
+#endif
 
 const int degreeInc = 2;
 const int degreeBins = 180 / degreeInc;
