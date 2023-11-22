@@ -1,10 +1,11 @@
 /*
  ============================================================================
  Author        : G. Barlas
- Version       : 1.0
- Last modified : December 2014
+ Modified by   : Isabel Solano, Christopher García, Andrea Lam
+ Version       : 2.0
+ Last modified : November 2023
  License       : Released under the GNU GPL 3.0
- Description   :
+ Description   : Constan hough version
  To build use  : make
  ============================================================================
  */
@@ -53,9 +54,17 @@ void CPU_HoughTran (unsigned char *pic, int w, int h, int **acc)
       }
 }
 
+/** Memoria constante*/
+// Almacenamos todos los posibles valores de senos y cosenos
+// los inicializamos en el main para pasarlos al device
+__constant__ float d_Cos[degreeBins];
+__constant__ float d_Sin[degreeBins];
+
 // GPU kernel. One thread per image pixel is spawned.
 // The accummulator memory needs to be allocated by the host in global memory
-__global__ void GPU_HoughTran(unsigned char *pic, int w, int h, int *acc, float rMax, float rScale, float *d_Cos, float *d_Sin) {
+__global__ void GPU_HoughTran(unsigned char *pic, int w, int h, int *acc, float rMax, float rScale) {
+    // ya no es necesrio pasar d_Cos ni d_Sin porque estas referencias son globales
+    
     int blockID = blockIdx.x;
     int threadID = threadIdx.x;
     int gloID = blockID * blockDim.x + threadID;
@@ -64,12 +73,14 @@ __global__ void GPU_HoughTran(unsigned char *pic, int w, int h, int *acc, float 
 
     int xCent = w / 2;
     int yCent = h / 2;
+
     int xCoord = gloID % w - xCent;
     int yCoord = yCent - gloID / w;
 
     if (pic[gloID] > 0) {
         for (int tIdx = 0; tIdx < degreeBins; tIdx++) {
             //float r = xCoord * cos(tIdx) + yCoord * sin(tIdx); //probar con esto para ver diferencia en tiempo
+            // llamada a d_Cos y d_Sin globales
             float r = xCoord * d_Cos[tIdx] + yCoord * d_Sin[tIdx];
             int rIdx = (r + rMax) / rScale;
             //debemos usar atomic, pero que race condition hay si somos un thread por pixel? explique
@@ -106,10 +117,7 @@ void drawAllLines(cv::Mat& image, int *h_hough, int w, int h, float rScale, floa
     }
 
     // Ordenar las líneas por peso en orden descendente
-    std::sort(linesWithWeights.begin(), linesWithWeights.end(), [](const std::pair<cv::Vec2f, int>& point0, const std::pair<cv::Vec2f, int>& point1) { 
-            return point0.second > point1.second;
-        }
-    );
+    std::sort(linesWithWeights.begin(), linesWithWeights.end(), [](const std::pair<cv::Vec2f, int>& point0, const std::pair<cv::Vec2f, int>& point1) { return point0.second > point1.second;});
 
     for (int i = 0; i < linesWithWeights.size(); ++i) {
         cv::Vec2f lineParams = linesWithWeights[i].first;
@@ -122,7 +130,7 @@ void drawAllLines(cv::Mat& image, int *h_hough, int w, int h, float rScale, floa
         cv::line(image, cv::Point(cvRound(xA), cvRound(yA)), cv::Point(cvRound(xB), cvRound(yB)), cv::Scalar(0, 255, 255), 1.75, cv::LINE_AA);
     }
 
-    cv::imwrite("output_base.png", image);
+    cv::imwrite("output_constante.png", image);
 }
 
 
@@ -157,8 +165,9 @@ int main(int argc, char **argv) {
     int w = originalImage.cols;
     int h = originalImage.rows;
 
-    float *d_Cos;
-    float *d_Sin;
+    // reemplazadas por las constantes
+    // float *d_Cos;
+    // float *d_Sin;
 
     // CPU calculation
     int *cpuResult;
@@ -180,8 +189,8 @@ int main(int argc, char **argv) {
     float rMax = sqrt(1.0 * w * w + 1.0 * h * h) / 2;
     float rScale = 2 * rMax / rBins;
 
-    cudaMemcpy(d_Cos, pcCos, sizeof(float) * degreeBins, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_Sin, pcSin, sizeof(float) * degreeBins, cudaMemcpyHostToDevice);
+    cudaMemcpyToSymbol(d_Cos, pcCos, sizeof(float) * degreeBins);
+    cudaMemcpyToSymbol(d_Sin, pcSin, sizeof(float) * degreeBins);
 
     // setup and copy data from host to device
     unsigned char *d_in, *h_in;
@@ -204,7 +213,7 @@ int main(int argc, char **argv) {
     // execution configuration uses a 1-D grid of 1-D blocks, each made of 256 threads
     //1 thread por pixel
     int blockNum = ceil(w * h / 256);
-    GPU_HoughTran<<<blockNum, 256>>>(d_in, w, h, d_hough, rMax, rScale, d_Cos, d_Sin);
+    GPU_HoughTran<<<blockNum, 256>>>(d_in, w, h, d_hough, rMax, rScale);
 
     // get results from device
     cudaMemcpy(h_hough, d_hough, sizeof(int) * degreeBins * rBins, cudaMemcpyDeviceToHost);
@@ -212,11 +221,17 @@ int main(int argc, char **argv) {
     // compare CPU and GPU results
     bool resultsMatch = compareResults(h_hough, cpuResult, degreeBins * rBins);
 
+    if (resultsMatch) {
+        printf("Los resultados coinciden entre GPU y CPU.\n");
+    } else {
+        printf("Los resultados difieren entre GPU y CPU.\n");
+    }
+
     // Crea una copia de la imagen original utilizando OpenCV
     cv::Mat imageWithLines;
     cv::cvtColor(originalImage, imageWithLines, cv::COLOR_GRAY2BGR); // Convierte a imagen en color
 
-    int threshold = 4175; // Threshold para evitar dibujar todas las líneas
+    int threshold = 4175; // Define la cantidad máxima de líneas a dibujar
     drawAllLines(imageWithLines, h_hough, w, h, rScale, rMax, threshold);
 
     // Marcar el final del tiempo de ejecución del kernel

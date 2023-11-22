@@ -60,23 +60,46 @@ __global__ void GPU_HoughTran(unsigned char *pic, int w, int h, int *acc, float 
     int threadID = threadIdx.x;
     int gloID = blockID * blockDim.x + threadID;
 
-    if (gloID >= w * h) return; // in case of extra threads in block
+    // Definir locID usando los IDs de los hilos del bloque
+    int locID = threadIdx.x;
 
-    int xCent = w / 2;
-    int yCent = h / 2;
-    int xCoord = gloID % w - xCent;
-    int yCoord = yCent - gloID / w;
+    // Definir un acumulador local en memoria compartida llamado localAcc
+    extern __shared__ int localAcc[];
+   
+    // Inicializar a 0 todos los elementos de este acumulador local
+    for (int i = locID; i < degreeBins * rBins; i += blockDim.x) {
+        localAcc[i] = 0;
+    }
 
-    if (pic[gloID] > 0) {
-        for (int tIdx = 0; tIdx < degreeBins; tIdx++) {
-            //float r = xCoord * cos(tIdx) + yCoord * sin(tIdx); //probar con esto para ver diferencia en tiempo
-            float r = xCoord * d_Cos[tIdx] + yCoord * d_Sin[tIdx];
-            int rIdx = (r + rMax) / rScale;
-            //debemos usar atomic, pero que race condition hay si somos un thread por pixel? explique
-            atomicAdd(&acc[rIdx * degreeBins + tIdx], 1);
+    // Barrera para asegurar que todos los hilos hayan completado la inicialización del acumulador local
+    __syncthreads();
+
+    if (gloID < w * h) { // Reemplazar el return por una condición para continuar solo si el hilo está dentro de la imagen
+        int xCent = w / 2;
+        int yCent = h / 2;
+        int xCoord = gloID % w - xCent;
+        int yCoord = yCent - gloID / w;
+
+        if (pic[gloID] > 0) {
+            for (int tIdx = 0; tIdx < degreeBins; tIdx++) {
+                float r = xCoord * d_Cos[tIdx] + yCoord * d_Sin[tIdx];
+                int rIdx = (r + rMax) / rScale;
+
+                // Coordinar el acceso a memoria y garantizar que la operación de suma sea completada por cada hilo
+                atomicAdd(&localAcc[rIdx * degreeBins + tIdx], 1);
+            }
         }
     }
+
+    // Barrera para asegurar que todos los hilos hayan completado el proceso de incremento del acumulador local
+    __syncthreads();
+
+    // Agregar un loop para sumar los valores del acumulador local localAcc al acumulador global acc
+    for (int i = locID; i < degreeBins * rBins; i += blockDim.x) {
+        atomicAdd(&acc[i], localAcc[i]);
+    }
 }
+
 
 // Se calculan puntos de la línea inicial y final
 double getPoints(double val, char op, double angulo) {
@@ -106,10 +129,7 @@ void drawAllLines(cv::Mat& image, int *h_hough, int w, int h, float rScale, floa
     }
 
     // Ordenar las líneas por peso en orden descendente
-    std::sort(linesWithWeights.begin(), linesWithWeights.end(), [](const std::pair<cv::Vec2f, int>& point0, const std::pair<cv::Vec2f, int>& point1) { 
-            return point0.second > point1.second;
-        }
-    );
+    std::sort(linesWithWeights.begin(), linesWithWeights.end(), [](const std::pair<cv::Vec2f, int>& point0, const std::pair<cv::Vec2f, int>& point1) { return point0.second > point1.second;});
 
     for (int i = 0; i < linesWithWeights.size(); ++i) {
         cv::Vec2f lineParams = linesWithWeights[i].first;
@@ -122,7 +142,7 @@ void drawAllLines(cv::Mat& image, int *h_hough, int w, int h, float rScale, floa
         cv::line(image, cv::Point(cvRound(xA), cvRound(yA)), cv::Point(cvRound(xB), cvRound(yB)), cv::Scalar(0, 255, 255), 1.75, cv::LINE_AA);
     }
 
-    cv::imwrite("output_base.png", image);
+    cv::imwrite("output.png", image);
 }
 
 
@@ -202,9 +222,13 @@ int main(int argc, char **argv) {
     cudaEventRecord(start);
 
     // execution configuration uses a 1-D grid of 1-D blocks, each made of 256 threads
-    //1 thread por pixel
-    int blockNum = ceil(w * h / 256);
-    GPU_HoughTran<<<blockNum, 256>>>(d_in, w, h, d_hough, rMax, rScale, d_Cos, d_Sin);
+    //Configurar la dimensión del bloque y memoria compartida
+    dim3 blockSize(256);
+    dim3 gridSize((w * h + blockSize.x - 1) / blockSize.x);
+    int sharedMemorySize = degreeBins * rBins * sizeof(int);
+
+    // Llamada al kernel con memoria compartida
+    GPU_HoughTran<<<gridSize, blockSize, sharedMemorySize>>>(d_in, w, h, d_hough, rMax, rScale, d_Cos, d_Sin);
 
     // get results from device
     cudaMemcpy(h_hough, d_hough, sizeof(int) * degreeBins * rBins, cudaMemcpyDeviceToHost);
@@ -212,11 +236,17 @@ int main(int argc, char **argv) {
     // compare CPU and GPU results
     bool resultsMatch = compareResults(h_hough, cpuResult, degreeBins * rBins);
 
+    if (resultsMatch) {
+        printf("Los resultados coinciden entre GPU y CPU.\n");
+    } else {
+        printf("Los resultados difieren entre GPU y CPU.\n");
+    }
+
     // Crea una copia de la imagen original utilizando OpenCV
     cv::Mat imageWithLines;
     cv::cvtColor(originalImage, imageWithLines, cv::COLOR_GRAY2BGR); // Convierte a imagen en color
 
-    int threshold = 4175; // Threshold para evitar dibujar todas las líneas
+    int threshold = 4175; // Define la cantidad máxima de líneas a dibujar
     drawAllLines(imageWithLines, h_hough, w, h, rScale, rMax, threshold);
 
     // Marcar el final del tiempo de ejecución del kernel
