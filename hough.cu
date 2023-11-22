@@ -1,13 +1,3 @@
-/*
- ============================================================================
- Author        : G. Barlas
- Version       : 1.0
- Last modified : December 2014
- License       : Released under the GNU GPL 3.0
- Description   :
- To build use  : make
- ============================================================================
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>

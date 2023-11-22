@@ -1,14 +1,3 @@
-/*
- ============================================================================
- Author        : G. Barlas
- Modified by   : Isabel Solano, Christopher García, Andrea Lam
- Version       : 2.0
- Last modified : November 2023
- License       : Released under the GNU GPL 3.0
- Description   : Constan hough version
- To build use  : make
- ============================================================================
- */
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
